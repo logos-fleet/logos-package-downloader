@@ -1432,3 +1432,76 @@ TEST(RefreshCatalogs, ReportsAnIndexItCannotRead) {
     EXPECT_NE(errs.find("index fetch failed"), std::string::npos);
     EXPECT_NE(errs.find("connection refused"), std::string::npos);
 }
+
+// ─── Per-package variants ─────────────────────────────────────────────────────
+//
+// A catalog row has to answer "will this run on my device" before anything is
+// downloaded. The variant names are the answer, and they are already in the
+// index inside each version's manifest `main` — the row just has to surface
+// them. They are lifted from the NEWEST version, because that is the one an
+// install picks up; the older ones stay visible under `versions[]`.
+
+TEST(Catalog, ARowNamesTheVariantsTheNewestVersionCarries) {
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = json{{"schemaVersion", 1}, {"name", "test"}, {"displayName", "Test"},
+                       {"indexUrl", kIndexUrl}, {"trustedSigners", json::array()}}.dump();
+    json v1 = makeVersion("0.1.0", "h_010", json::array());
+    v1["manifest"]["name"] = "widget";
+    v1["manifest"]["main"] = json{{"linux-x86_64", "lib/w.so"}};
+    json v2 = makeVersion("0.2.0", "h_020", json::array());
+    v2["manifest"]["name"] = "widget";
+    v2["manifest"]["main"] = json{
+        {"ios-arm64",     "MyWidget.framework/MyWidget"},
+        {"android-arm64", "lib/libw.so"},
+        {"web",           "index.js"},
+    };
+    f->indexJson = json{
+        {"schemaVersion", 2}, {"repositoryName", "test"},
+        // Deliberately oldest-first, so a row that reads versions[0] verbatim
+        // rather than the newest one fails here.
+        {"packages", json::array({
+            json{{"name", "widget"}, {"versions", json::array({v1, v2})}},
+        })},
+    }.dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    ASSERT_TRUE(catalog[0].contains("variants")) << catalog[0].dump(2);
+    EXPECT_EQ(catalog[0]["variants"],
+              (json::array({"android-arm64", "ios-arm64", "web"})))
+        << catalog[0]["variants"].dump();
+}
+
+TEST(Catalog, ARowWithNothingToSayCarriesAnEmptyVariantList) {
+    // `main` has a plain-string form, and an index row may carry no manifest
+    // at all. Neither is a variant list, and neither may be a crash or a
+    // missing key: a consumer filtering on `variants` needs the field present.
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = json{{"schemaVersion", 1}, {"name", "test"}, {"displayName", "Test"},
+                       {"indexUrl", kIndexUrl}, {"trustedSigners", json::array()}}.dump();
+    json stringMain = makeVersion("0.1.0", "h_010", json::array());
+    stringMain["manifest"]["name"] = "stringy";
+    stringMain["manifest"]["main"] = "lib/x.so";
+    json noManifest = makeVersion("0.1.0", "h_020", json::array());
+    noManifest["manifest"] = nullptr;
+    f->indexJson = json{
+        {"schemaVersion", 2}, {"repositoryName", "test"},
+        {"packages", json::array({
+            json{{"name", "stringy"},  {"versions", json::array({stringMain})}},
+            json{{"name", "bare"},     {"versions", json::array({noManifest})}},
+            json{{"name", "empty"},    {"versions", json::array()}},
+        })},
+    }.dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 3u);
+    for (const auto& row : catalog) {
+        ASSERT_TRUE(row.contains("variants")) << row.dump(2);
+        EXPECT_TRUE(row["variants"].is_array()) << row.dump(2);
+        EXPECT_TRUE(row["variants"].empty()) << row["variants"].dump();
+    }
+}

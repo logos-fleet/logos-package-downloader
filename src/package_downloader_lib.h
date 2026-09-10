@@ -174,10 +174,14 @@ public:
     std::string listRepositoriesJson();
 
     /// JSON array of all packages across all enabled repos. Each element:
-    /// `{ repositoryUrl, repositoryName, name, versions: [...] }`.
+    /// `{ repositoryUrl, repositoryName, name, variants: [...], versions: [...] }`.
     /// `versions[]` is sorted newest-first by `releasedAt` and contains
     /// `releasedAt, publisherRef, url, size, sha256, rootHash, manifest,
     /// signature?` exactly as in `index.json`.
+    /// `variants[]` is the sorted platform-variant list of the NEWEST version
+    /// (the keys of its manifest `main`) — what a caller filters on to answer
+    /// "will this run on my device" before downloading anything. Always
+    /// present, empty when the newest version declares none.
     std::string getCatalogJson();
 
     /// JSON array of all packages for one repo (URL or canonical name).
