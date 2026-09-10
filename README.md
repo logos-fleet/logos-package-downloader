@@ -44,6 +44,10 @@ dl.registry().removeRepository("https://example.com/my/logos-repo.json");
 std::string repos = dl.listRepositoriesJson();    // [{url,enabled,isDefault,name,…,resolveError}]
 
 // ── Catalog ─────────────────────────────────────────────────────
+// Each row: {repositoryUrl,name,displayName,type,category,…,variants,versions}.
+// `variants` is the newest version's platform-variant list (sorted, always
+// present) — desktop, mobile and web names from logos-package's vocabulary —
+// so a caller can answer "will this run on my device" before downloading.
 std::string all   = dl.getCatalogJson();          // merged across enabled repos
 std::string oneEl = dl.getCatalogForRepoJson("my-catalog"); // one repo (url or name)
 dl.refreshCatalogs();                              // force re-fetch of repo metadata + indexes

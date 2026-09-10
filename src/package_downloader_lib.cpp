@@ -84,6 +84,22 @@ const json& objOrEmpty(const json& parent, const char* key) {
     return *it;
 }
 
+// The platform variants a manifest ships, as a sorted array of names — the
+// keys of its `main` map. The vocabulary is logos-package's (desktop, mobile
+// and web, see its docs/spec.md); a catalog only reports what it is told, so
+// this neither validates nor canonicalises. Sorted so a row is stable across
+// index rebuilds, which is what makes two catalog fetches diffable.
+//
+// Anything that is not a variant map — `main`'s plain-string form, an index
+// row with no manifest — yields an empty array rather than nothing at all.
+json variantsOf(const json& manifest) {
+    std::vector<std::string> names;
+    const json& main = objOrEmpty(manifest, "main");
+    for (auto it = main.begin(); it != main.end(); ++it) names.push_back(it.key());
+    std::sort(names.begin(), names.end());
+    return json(names);
+}
+
 // ─── Semver ───────────────────────────────────────────────────────────────────
 //
 // Parsing, precedence and range matching all come from the shared
@@ -739,28 +755,38 @@ struct PackageDownloaderLib::Impl {
                 entry["repositoryName"] = r.name.empty() ? r.url : r.name;
                 entry["repositoryDisplayName"] = r.displayName;
                 entry["name"] = pkg["name"];
-                // Package "header" fields lifted from the first version's
-                // embedded manifest (constant across a package's versions).
-                if (pkg.contains("versions") && pkg["versions"].is_array()
-                    && !pkg["versions"].empty()) {
-                    const json& firstVersion = pkg["versions"][0];
-                    const json& firstManifest = objOrEmpty(firstVersion, "manifest");
-                    entry["displayName"] = firstManifest.value("display_name", "");
-                    entry["description"] = firstManifest.value("description", "");
-                    entry["type"]        = firstManifest.value("type", "");
-                    entry["category"]    = firstManifest.value("category", "");
-                    entry["author"]      = firstManifest.value("author", "");
-                    entry["manifestVersion"] = firstManifest.value("manifestVersion", "");
-                    entry["provides"] = firstManifest.value("provides", "");
+                auto versions = pkg.value("versions", json::array());
+                std::stable_sort(versions.begin(), versions.end(), VersionPrecedenceDesc{});
+                // Package "header" fields lifted from the NEWEST version's
+                // embedded manifest. Most are constant across a package's
+                // versions; `variants` is the one that genuinely moves — a
+                // package gains a target in a release — and the newest is the
+                // one an install picks up, so it is the one a row answers
+                // "will this run on my device" with. The older lists stay
+                // visible under versions[].manifest.main.
+                //
+                // `variants` is always present, even when empty: a consumer
+                // filtering rows by platform needs a list to read, not a key
+                // to test for.
+                entry["variants"] = json::array();
+                if (!versions.empty()) {
+                    const json& newestVersion = versions[0];
+                    const json& newestManifest = objOrEmpty(newestVersion, "manifest");
+                    entry["displayName"] = newestManifest.value("display_name", "");
+                    entry["description"] = newestManifest.value("description", "");
+                    entry["type"]        = newestManifest.value("type", "");
+                    entry["category"]    = newestManifest.value("category", "");
+                    entry["author"]      = newestManifest.value("author", "");
+                    entry["manifestVersion"] = newestManifest.value("manifestVersion", "");
+                    entry["provides"] = newestManifest.value("provides", "");
+                    entry["variants"] = variantsOf(newestManifest);
                     const std::string iconPath =
-                        objOrEmpty(firstVersion, "icon").value("path", "");
+                        objOrEmpty(newestVersion, "icon").value("path", "");
                     const auto slash = r.indexUrl.find_last_of('/');
                     if (!iconPath.empty() && slash != std::string::npos) {
                         entry["icon"] = r.indexUrl.substr(0, slash) + "/" + iconPath;
                     }
                 }
-                auto versions = pkg.value("versions", json::array());
-                std::stable_sort(versions.begin(), versions.end(), VersionPrecedenceDesc{});
                 entry["versions"] = std::move(versions);
                 out.push_back(std::move(entry));
             }

@@ -178,6 +178,16 @@ int cmdInfo(const CliOpts& o, const std::string& name) {
     std::cout << "Repository:  " << found.value("repositoryDisplayName", "")
               << " (" << found.value("repositoryUrl", "") << ")\n";
     std::cout << "Description: " << found.value("description", "") << "\n";
+    // The variants the newest version ships: whether this package runs on the
+    // reader's device, before anything is downloaded.
+    if (found.contains("variants") && found["variants"].is_array()) {
+        std::string variants;
+        for (const auto& v : found["variants"]) {
+            if (!variants.empty()) variants += ", ";
+            variants += v.get<std::string>();
+        }
+        std::cout << "Variants:    " << (variants.empty() ? "(none)" : variants) << "\n";
+    }
     std::cout << "\nVersions (newest first):\n";
     if (!found.contains("versions") || found["versions"].empty()) {
         std::cout << "  (none)\n";
