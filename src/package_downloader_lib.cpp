@@ -764,30 +764,29 @@ struct PackageDownloaderLib::Impl {
                 // one an install picks up, so it is the one a row answers
                 // "will this run on my device" with. The older lists stay
                 // visible under versions[].manifest.main.
+                //
+                // `variants` is always present, even when empty: a consumer
+                // filtering rows by platform needs a list to read, not a key
+                // to test for.
+                entry["variants"] = json::array();
                 if (!versions.empty()) {
-                    const json& firstVersion = versions[0];
-                    const json& firstManifest = objOrEmpty(firstVersion, "manifest");
-                    entry["displayName"] = firstManifest.value("display_name", "");
-                    entry["description"] = firstManifest.value("description", "");
-                    entry["type"]        = firstManifest.value("type", "");
-                    entry["category"]    = firstManifest.value("category", "");
-                    entry["author"]      = firstManifest.value("author", "");
-                    entry["manifestVersion"] = firstManifest.value("manifestVersion", "");
-                    entry["provides"] = firstManifest.value("provides", "");
+                    const json& newestVersion = versions[0];
+                    const json& newestManifest = objOrEmpty(newestVersion, "manifest");
+                    entry["displayName"] = newestManifest.value("display_name", "");
+                    entry["description"] = newestManifest.value("description", "");
+                    entry["type"]        = newestManifest.value("type", "");
+                    entry["category"]    = newestManifest.value("category", "");
+                    entry["author"]      = newestManifest.value("author", "");
+                    entry["manifestVersion"] = newestManifest.value("manifestVersion", "");
+                    entry["provides"] = newestManifest.value("provides", "");
+                    entry["variants"] = variantsOf(newestManifest);
                     const std::string iconPath =
-                        objOrEmpty(firstVersion, "icon").value("path", "");
+                        objOrEmpty(newestVersion, "icon").value("path", "");
                     const auto slash = r.indexUrl.find_last_of('/');
                     if (!iconPath.empty() && slash != std::string::npos) {
                         entry["icon"] = r.indexUrl.substr(0, slash) + "/" + iconPath;
                     }
                 }
-                // Always present, even when empty: a consumer filtering rows by
-                // platform needs a list to read, not a key to test for. `main`
-                // also has a plain-string form and an index row may carry no
-                // manifest at all — neither is a variant list.
-                entry["variants"] = versions.empty()
-                                  ? json::array()
-                                  : variantsOf(objOrEmpty(versions[0], "manifest"));
                 entry["versions"] = std::move(versions);
                 out.push_back(std::move(entry));
             }
