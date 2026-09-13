@@ -65,6 +65,29 @@ std::string toLower(std::string s) {
     return s;
 }
 
+// Expand `{name}` / `{version}` in a per-module link template.
+//
+// EVERY occurrence, because a template may legitimately use the name twice
+// ("https://{name}.logos.test/m/{name}"), and a placeholder left behind would
+// reach the Shell as part of a URL it then opens. An empty template yields an
+// empty string rather than a bare placeholder for the same reason.
+std::string expandLinkTemplate(const std::string& tmpl,
+                               const std::string& name,
+                               const std::string& version) {
+    if (tmpl.empty()) return {};
+
+    auto replaceAll = [](std::string& s, const std::string& needle, const std::string& value) {
+        for (size_t at = s.find(needle); at != std::string::npos;
+             at = s.find(needle, at + value.size()))
+            s.replace(at, needle.size(), value);
+    };
+
+    std::string out = tmpl;
+    replaceAll(out, "{name}", name);
+    replaceAll(out, "{version}", version);
+    return out;
+}
+
 // nlohmann::json::value(key, default) returns `default` only when the key is
 // absent; if the key is present with a `null` value, value() returns the null
 // itself and any chained .value() call on it throws json::type_error 306
@@ -386,6 +409,15 @@ bool parseLogosRepoJson(const std::string& body, Repository& dst, std::string& e
         dst.description = j.value("description", "");
         dst.homepage    = j.value("homepage", "");
         dst.indexUrl    = j["indexUrl"].get<std::string>();
+        // Per-module link templates (guideline 4.7.1 / 4.7.4). Optional, and a
+        // non-string is treated as absent rather than stringified: a URL the
+        // Shell will OPEN must come from a field that actually held one.
+        dst.reportUrlTemplate =
+            j.contains("reportUrlTemplate") && j["reportUrlTemplate"].is_string()
+                ? j["reportUrlTemplate"].get<std::string>() : std::string();
+        dst.universalLinkTemplate =
+            j.contains("universalLinkTemplate") && j["universalLinkTemplate"].is_string()
+                ? j["universalLinkTemplate"].get<std::string>() : std::string();
         dst.trustedSignerDids.clear();
         if (j.contains("trustedSigners") && j["trustedSigners"].is_array()) {
             for (const auto& s : j["trustedSigners"]) {
@@ -529,6 +561,8 @@ struct RepositoryRegistry::Impl {
         parsed.description.clear();
         parsed.homepage.clear();
         parsed.indexUrl.clear();
+        parsed.reportUrlTemplate.clear();
+        parsed.universalLinkTemplate.clear();
         parsed.trustedSignerDids.clear();
         if (!parseLogosRepoJson(body, parsed, err)) {
             r.resolveError = "logos-repo.json: " + err;
@@ -769,9 +803,11 @@ struct PackageDownloaderLib::Impl {
                 // filtering rows by platform needs a list to read, not a key
                 // to test for.
                 entry["variants"] = json::array();
+                std::string newestVersionName;
                 if (!versions.empty()) {
                     const json& newestVersion = versions[0];
                     const json& newestManifest = objOrEmpty(newestVersion, "manifest");
+                    newestVersionName = newestManifest.value("version", "");
                     entry["displayName"] = newestManifest.value("display_name", "");
                     entry["description"] = newestManifest.value("description", "");
                     entry["type"]        = newestManifest.value("type", "");
@@ -787,6 +823,25 @@ struct PackageDownloaderLib::Impl {
                         entry["icon"] = r.indexUrl.substr(0, slash) + "/" + iconPath;
                     }
                 }
+                // Per-module report + universal link, in source order: the
+                // package's own value first (a module hosted somewhere its
+                // repository is not), then the repository's template. Always
+                // present, empty when neither says anything -- same rule as
+                // `variants`, and for the same reason: a consumer needs a field
+                // to read, not a key to test for.
+                //
+                // A non-string package-level value falls THROUGH to the
+                // template. An index is somebody else's file, and a number where
+                // a URL belongs must not reach a consumer as a link it opens.
+                const std::string pkgName = pkg["name"].is_string()
+                                          ? pkg["name"].get<std::string>() : std::string();
+                auto linkFor = [&](const char* key, const std::string& tmpl) {
+                    if (pkg.contains(key) && pkg[key].is_string())
+                        return pkg[key].get<std::string>();
+                    return expandLinkTemplate(tmpl, pkgName, newestVersionName);
+                };
+                entry["reportUrl"]     = linkFor("reportUrl", r.reportUrlTemplate);
+                entry["universalLink"] = linkFor("universalLink", r.universalLinkTemplate);
                 entry["versions"] = std::move(versions);
                 out.push_back(std::move(entry));
             }
@@ -831,6 +886,8 @@ std::string PackageDownloaderLib::listRepositoriesJson() {
         e["homepage"] = r.homepage;
         e["indexUrl"] = r.indexUrl;
         e["trustedSignerDids"] = r.trustedSignerDids;
+        e["reportUrlTemplate"] = r.reportUrlTemplate;
+        e["universalLinkTemplate"] = r.universalLinkTemplate;
         e["resolveError"] = r.resolveError;
         arr.push_back(std::move(e));
     }
@@ -849,9 +906,15 @@ std::string PackageDownloaderLib::getCatalogJson() {
 }
 
 std::string PackageDownloaderLib::getCatalogForRepoJson(const std::string& urlOrName) {
+    // Metadata FIRST, then the lookup. `repo` is a copy, so a lookup taken
+    // before the refresh captured an entry whose indexUrl and canonical name
+    // were still empty -- which made this return "[]" on a first call (nothing
+    // to fetch), and made a lookup BY canonical name miss outright. Both entry
+    // points now see the same hydrated registry, which is the property the
+    // shared appendCatalogEntries exists to guarantee.
+    impl_->ensureMetadata();
     auto repo = impl_->registry.findByUrlOrName(urlOrName);
     if (!repo) return "[]";
-    impl_->ensureMetadata();
     // Same synthesised shape as getCatalogJson, scoped to one repo —
     // callers (CLI `--repo`, the UI, the C API) get repositoryUrl,
     // date-sorted versions, and the package-level header fields, not the

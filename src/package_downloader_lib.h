@@ -79,6 +79,23 @@ struct Repository {
     /// (The official catalog ships `"trustedSigners": []` today, so it vouches
     /// for nobody in any case.)
     std::vector<std::string> trustedSignerDids;
+
+    /// Per-module link TEMPLATES the repository declares, with `{name}` and
+    /// `{version}` placeholders expanded per catalog row.
+    ///
+    /// `reportUrlTemplate` is where a user reports a module that misbehaves
+    /// (App Store guideline 4.7.1); `universalLinkTemplate` is the link that
+    /// addresses one module from outside the app (4.7.4). A Store shell needs
+    /// both per module, and a catalog with three hundred modules should not have
+    /// to repeat one URL three hundred times -- so the repository declares the
+    /// shape and the client expands it. A package may override either with its
+    /// own explicit `reportUrl` / `universalLink`.
+    ///
+    /// Empty when logos-repo.json declares none; the catalog row then carries
+    /// empty strings rather than omitting the keys.
+    std::string reportUrlTemplate;
+    std::string universalLinkTemplate;
+
     std::string resolveError; ///< non-empty when the fetch / parse failed
 };
 
@@ -170,7 +187,8 @@ public:
 
     /// JSON array of repositories. Each element:
     /// `{ url, enabled, isDefault, name, displayName, description,
-    ///    homepage, indexUrl, trustedSignerDids[], resolveError }`.
+    ///    homepage, indexUrl, trustedSignerDids[], reportUrlTemplate,
+    ///    universalLinkTemplate, resolveError }`.
     std::string listRepositoriesJson();
 
     /// JSON array of all packages across all enabled repos. Each element:
@@ -182,6 +200,10 @@ public:
     /// (the keys of its manifest `main`) — what a caller filters on to answer
     /// "will this run on my device" before downloading anything. Always
     /// present, empty when the newest version declares none.
+    /// `reportUrl` and `universalLink` are the per-module links a Store shell
+    /// needs (guideline 4.7.1 / 4.7.4): the package's own values if it declares
+    /// them, else the repository's template with `{name}` / `{version}`
+    /// expanded, else empty. Always present, like `variants`.
     std::string getCatalogJson();
 
     /// JSON array of all packages for one repo (URL or canonical name).

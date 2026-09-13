@@ -1505,3 +1505,197 @@ TEST(Catalog, ARowWithNothingToSayCarriesAnEmptyVariantList) {
         EXPECT_TRUE(row["variants"].empty()) << row["variants"].dump();
     }
 }
+
+// ─── Report link and universal link (guideline 4.7.1 / 4.7.4) ────────────────
+//
+// A Store shell has to give the user a way to REPORT a module that misbehaves,
+// and the catalog has to publish a UNIVERSAL LINK per module so one can be
+// pointed at from outside the app. Both are catalog data: the downloader is a
+// read-only client of the index and this is the field pair it publishes.
+//
+// Two sources, in order. A package may carry its own `reportUrl` /
+// `universalLink` — a module hosted somewhere its repository is not. Otherwise
+// the repository's `logos-repo.json` declares a TEMPLATE and the client expands
+// it per row: a catalog with three hundred modules should not have to repeat one
+// URL three hundred times, and a template that lives beside `indexUrl` is
+// exactly as trustworthy as the index it names.
+//
+// Both keys are ALWAYS present, empty when neither source has anything, for the
+// same reason `variants` is: a consumer needs a field to read, not a key to test
+// for.
+
+namespace {
+// A logos-repo.json carrying the two templates.
+json repoJsonWithLinks(const char* reportTemplate, const char* universalTemplate) {
+    json j{{"schemaVersion", 1}, {"name", "test"}, {"displayName", "Test"},
+           {"indexUrl", kIndexUrl}, {"trustedSigners", json::array()}};
+    if (reportTemplate)    j["reportUrlTemplate"]     = reportTemplate;
+    if (universalTemplate) j["universalLinkTemplate"] = universalTemplate;
+    return j;
+}
+
+json oneWidgetIndex(json packageExtras = json::object()) {
+    json v = makeVersion("1.2.0", "h_120", json::array());
+    v["manifest"]["name"] = "widget";
+    json pkg{{"name", "widget"}, {"versions", json::array({v})}};
+    for (auto it = packageExtras.begin(); it != packageExtras.end(); ++it)
+        pkg[it.key()] = it.value();
+    return json{{"schemaVersion", 2}, {"repositoryName", "test"},
+                {"packages", json::array({pkg})}};
+}
+}  // namespace
+
+TEST(CatalogLinks, RepositoryTemplatesAreExpandedPerModule) {
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks("https://logos.test/report?module={name}",
+                                    "https://logos.test/m/{name}").dump();
+    f->indexJson = oneWidgetIndex().dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    EXPECT_EQ(catalog[0].value("reportUrl", ""),
+              "https://logos.test/report?module=widget");
+    EXPECT_EQ(catalog[0].value("universalLink", ""), "https://logos.test/m/widget");
+}
+
+TEST(CatalogLinks, VersionPlaceholderExpandsToTheNewestVersion) {
+    // Which is the version an install would pick up, so it is the one a link
+    // pointing at "this module" should resolve to.
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks(nullptr, "https://logos.test/m/{name}/{version}").dump();
+    f->indexJson = oneWidgetIndex().dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    EXPECT_EQ(catalog[0].value("universalLink", ""), "https://logos.test/m/widget/1.2.0");
+}
+
+TEST(CatalogLinks, APackagesOwnLinksBeatTheRepositoryTemplate) {
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks("https://logos.test/report?module={name}",
+                                    "https://logos.test/m/{name}").dump();
+    f->indexJson = oneWidgetIndex(json{
+        {"reportUrl", "https://widget.example/abuse"},
+        {"universalLink", "https://widget.example/app"},
+    }).dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    EXPECT_EQ(catalog[0].value("reportUrl", ""), "https://widget.example/abuse");
+    EXPECT_EQ(catalog[0].value("universalLink", ""), "https://widget.example/app");
+}
+
+TEST(CatalogLinks, BothKeysArePresentAndEmptyWhenNobodyDeclaresAnything) {
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks(nullptr, nullptr).dump();
+    f->indexJson = oneWidgetIndex().dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    ASSERT_TRUE(catalog[0].contains("reportUrl")) << catalog[0].dump(2);
+    ASSERT_TRUE(catalog[0].contains("universalLink")) << catalog[0].dump(2);
+    EXPECT_EQ(catalog[0]["reportUrl"], "");
+    EXPECT_EQ(catalog[0]["universalLink"], "");
+}
+
+TEST(CatalogLinks, ANonStringPackageLevelLinkIsIgnoredRatherThanSerialised) {
+    // An index is somebody else's file. A number where a URL belongs must not
+    // reach a consumer as a link it will try to open.
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks("https://logos.test/report?module={name}", nullptr).dump();
+    f->indexJson = oneWidgetIndex(json{{"reportUrl", 42}}).dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    // Falls back to the template rather than carrying 42 through.
+    EXPECT_EQ(catalog[0].value("reportUrl", ""), "https://logos.test/report?module=widget");
+}
+
+TEST(CatalogLinks, ATemplateWithNoPlaceholderIsUsedVerbatim) {
+    // One report address for the whole catalog is a legitimate policy.
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks("https://logos.test/report", nullptr).dump();
+    f->indexJson = oneWidgetIndex().dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    EXPECT_EQ(catalog[0].value("reportUrl", ""), "https://logos.test/report");
+}
+
+TEST(CatalogLinks, EveryPlaceholderOccurrenceIsExpanded) {
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks(nullptr, "https://{name}.logos.test/m/{name}").dump();
+    f->indexJson = oneWidgetIndex().dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    EXPECT_EQ(catalog[0].value("universalLink", ""), "https://widget.logos.test/m/widget");
+}
+
+TEST(CatalogLinks, ARowWithNoVersionsStillGetsItsNameExpanded) {
+    // {version} has nothing to expand to and must not leave the placeholder in a
+    // URL the Shell would then open.
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks(nullptr, "https://logos.test/m/{name}/{version}").dump();
+    f->indexJson = json{{"schemaVersion", 2}, {"repositoryName", "test"},
+                        {"packages", json::array({
+                            json{{"name", "empty"}, {"versions", json::array()}},
+                        })}}.dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto catalog = json::parse(lib.getCatalogJson());
+    ASSERT_EQ(catalog.size(), 1u);
+    EXPECT_EQ(catalog[0].value("universalLink", ""), "https://logos.test/m/empty/");
+}
+
+TEST(CatalogLinks, TheTemplatesAreEchoedInTheRepositoryListing) {
+    // So a "Manage Repositories" screen can show what a repository promises,
+    // and so a catalog author can see their template arrived.
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks("https://logos.test/report?module={name}",
+                                    "https://logos.test/m/{name}").dump();
+    f->indexJson = oneWidgetIndex().dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    auto repos = json::parse(lib.listRepositoriesJson());
+    ASSERT_FALSE(repos.empty());
+    EXPECT_EQ(repos[0].value("reportUrlTemplate", ""),
+              "https://logos.test/report?module={name}");
+    EXPECT_EQ(repos[0].value("universalLinkTemplate", ""), "https://logos.test/m/{name}");
+}
+
+TEST(CatalogLinks, GetCatalogForRepoCarriesTheSameTwoKeys) {
+    // The two entry points must not diverge; they share appendCatalogEntries
+    // precisely so they cannot, and this is the assertion that says so.
+    auto f = std::make_shared<MockFetcher>();
+    f->repoJson = repoJsonWithLinks("https://logos.test/report?module={name}",
+                                    "https://logos.test/m/{name}").dump();
+    f->indexJson = oneWidgetIndex().dump();
+
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(f);
+    // By canonical NAME, which is what a "--repo test" caller writes. It only
+    // resolves because getCatalogForRepoJson hydrates the registry before it
+    // looks anything up; taking the lookup first captured a copy with an empty
+    // indexUrl and returned "[]".
+    auto catalog = json::parse(lib.getCatalogForRepoJson("test"));
+    ASSERT_EQ(catalog.size(), 1u);
+    EXPECT_EQ(catalog[0].value("reportUrl", ""), "https://logos.test/report?module=widget");
+    EXPECT_EQ(catalog[0].value("universalLink", ""), "https://logos.test/m/widget");
+}
