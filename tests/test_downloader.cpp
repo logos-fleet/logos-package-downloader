@@ -1699,3 +1699,114 @@ TEST(CatalogLinks, GetCatalogForRepoCarriesTheSameTwoKeys) {
     EXPECT_EQ(catalog[0].value("reportUrl", ""), "https://logos.test/report?module=widget");
     EXPECT_EQ(catalog[0].value("universalLink", ""), "https://logos.test/m/widget");
 }
+
+// ─── A LOCAL CATALOG RELEASE, SERVED OVER HTTP TO A LOOPBACK HOST ────────────
+//
+// `https required in v1` is the right rule for a catalog on the internet, and
+// it stays the rule: a repository manifest fetched in clear text is one an
+// attacker on the path can rewrite, and every field in it -- the index URL, the
+// trusted signer DIDs -- decides what gets installed.
+//
+// It is not the rule for a catalog a developer is BUILDING. A phone's App
+// Manager browses a local release served off the machine that built it, and
+// there are no bytes on a network to protect: this curl carries no CA bundle
+// (an OpenSSL build has none and the Secure Transport backend is gone), so
+// https to a self-signed local server is not a stricter path, it is a
+// non-working one.
+//
+// So plain http survives for a LOOPBACK HOST and nowhere else -- the same rule,
+// for the same reason, that logos-basecamp's CatalogEntry already applies to a
+// catalog row's report and universal links.
+
+namespace {
+
+// Serves one logos-repo.json and one index.json whatever is asked for, so a
+// test only has to care about which URL the registry was willing to try.
+class AnyUrlFetcher : public lgpd::Fetcher {
+public:
+    std::string repoJson;
+    std::string indexJson;
+    std::vector<std::string> requested;
+    lgpd::FetchResult get(const std::string& u, std::string& out) override {
+        requested.push_back(u);
+        out = (u.find("index.json") != std::string::npos) ? indexJson : repoJson;
+        return {true, {}};
+    }
+    lgpd::FetchResult getToFile(const std::string&, const std::string&) override {
+        return {false, "not served"};
+    }
+};
+
+std::shared_ptr<AnyUrlFetcher> localCatalogFetcher(const std::string& indexUrl)
+{
+    auto mock = std::make_shared<AnyUrlFetcher>();
+    mock->repoJson = json{{"schemaVersion", 1}, {"name", "local"},
+                          {"displayName", "Local release"}, {"indexUrl", indexUrl},
+                          {"trustedSigners", json::array()}}.dump();
+    mock->indexJson = json{{"schemaVersion", 2}, {"repositoryName", "local"},
+                           {"packages", json::array()}}.dump();
+    return mock;
+}
+
+fs::path scratchConfig(const char* tag)
+{
+    return fs::temp_directory_path()
+         / ("lgpd_test_" + std::string(tag) + "_" + std::to_string(std::rand()) + ".json");
+}
+
+} // namespace
+
+TEST(Registry, ALocalCatalogIsServedOverHttpToALoopbackHost) {
+    for (const char* url : { "http://127.0.0.1:8080/logos-repo.json",
+                             "http://localhost:8080/logos-repo.json",
+                             "http://[::1]:8080/logos-repo.json" }) {
+        fs::path cfg = scratchConfig("loopback");
+        lgpd::PackageDownloaderLib lib(cfg.string());
+        lib.setFetcher(localCatalogFetcher("http://127.0.0.1:8080/index.json"));
+
+        const auto err = lib.registry().addRepository(url);
+        EXPECT_TRUE(err.empty()) << url << ": " << err;
+
+        const auto repos = lib.registry().list();
+        ASSERT_EQ(repos.size(), 2u) << url;
+        EXPECT_EQ(repos[1].url, std::string(url));
+        // ...and it RESOLVED: the manifest was fetched and parsed, which is
+        // what turns the row into a catalog rather than a URL on a list.
+        EXPECT_EQ(repos[1].indexUrl, std::string("http://127.0.0.1:8080/index.json"));
+        fs::remove(cfg);
+    }
+}
+
+TEST(Registry, PlainHttpToAnyOtherHostIsStillRefused) {
+    for (const char* url : { "http://example.com/logos-repo.json",
+                             "http://192.168.1.10/logos-repo.json",
+                             // The loopback name as a PREFIX of someone else's
+                             // host is the obvious way to get this wrong.
+                             "http://localhost.evil.test/logos-repo.json",
+                             "http://127.0.0.1.evil.test/logos-repo.json",
+                             "ftp://127.0.0.1/logos-repo.json",
+                             "file:///tmp/logos-repo.json" }) {
+        fs::path cfg = scratchConfig("nonloopback");
+        lgpd::PackageDownloaderLib lib(cfg.string());
+        auto mock = localCatalogFetcher("http://127.0.0.1:8080/index.json");
+        lib.setFetcher(mock);
+
+        const auto err = lib.registry().addRepository(url);
+        EXPECT_FALSE(err.empty()) << url << " was accepted";
+        EXPECT_NE(err.find("scheme"), std::string::npos) << err;
+        // Refused BEFORE any traffic: a repository the registry will not keep
+        // must not have been contacted either.
+        EXPECT_TRUE(mock->requested.empty()) << "fetched " << mock->requested.front();
+        EXPECT_EQ(lib.registry().list().size(), 1u) << url;   // the default only
+        fs::remove(cfg);
+    }
+}
+
+TEST(Registry, HttpsIsUnchangedForEveryHost) {
+    fs::path cfg = scratchConfig("https");
+    lgpd::PackageDownloaderLib lib(cfg.string());
+    lib.setFetcher(localCatalogFetcher("https://example.com/index.json"));
+
+    EXPECT_TRUE(lib.registry().addRepository("https://example.com/logos-repo.json").empty());
+    fs::remove(cfg);
+}
