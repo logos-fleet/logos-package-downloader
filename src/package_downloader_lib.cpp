@@ -433,8 +433,60 @@ bool parseLogosRepoJson(const std::string& body, Repository& dst, std::string& e
     }
 }
 
+// One sentence, in both places that refuse, and it names the exception: a
+// developer serving a local release is exactly who reads it.
+const char* const kUnsupportedSchemeError =
+    "unsupported URL scheme (https, or http to a loopback host for a local "
+    "catalog release)";
+
 bool isHttpsUrl(const std::string& url) {
     return url.rfind("https://", 0) == 0;
+}
+
+// PLAIN HTTP, TO A LOOPBACK HOST, AND NOWHERE ELSE.
+//
+// A catalog on the internet is fetched over https and that does not change: a
+// repository manifest read in clear text is one an attacker on the path can
+// rewrite, and every field in it -- the index URL, the trusted signer DIDs --
+// decides what gets installed.
+//
+// A catalog a developer is BUILDING is the case that rule has no answer for.
+// A Store shell browses a local release served off the machine that built it,
+// and there are no bytes on a network to protect. https is not a stricter path
+// there, it is a non-working one: this curl carries no CA bundle at all (an
+// OpenSSL build has none and curl's Secure Transport backend is gone), so a
+// self-signed local server cannot be reached however the URL is spelled.
+//
+// The host is compared WHOLE, up to the port. A prefix test would accept
+// `localhost.evil.test` and `127.0.0.1.evil.test`, which are ordinary public
+// names that happen to start with a loopback spelling.
+bool isLoopbackHttpUrl(const std::string& url) {
+    static const std::string kHttp = "http://";
+    if (url.rfind(kHttp, 0) != 0) return false;
+
+    const std::string rest = url.substr(kHttp.size());
+    // The authority: everything before the path, the query or the fragment.
+    const auto end = rest.find_first_of("/?#");
+    std::string authority = (end == std::string::npos) ? rest : rest.substr(0, end);
+    // No userinfo. `http://127.0.0.1@evil.test/` reaches evil.test, and a host
+    // taken from before the '@' would be the attacker's choice of spelling.
+    if (authority.find('@') != std::string::npos) return false;
+
+    std::string host = authority;
+    if (!host.empty() && host.front() == '[') {          // [::1]:8080
+        const auto close = host.find(']');
+        if (close == std::string::npos) return false;
+        host = host.substr(1, close - 1);
+    } else {
+        const auto colon = host.find(':');
+        if (colon != std::string::npos) host = host.substr(0, colon);
+    }
+    return host == "127.0.0.1" || host == "localhost" || host == "::1";
+}
+
+// What this registry will fetch a repository manifest over.
+bool isSupportedRepositoryUrl(const std::string& url) {
+    return isHttpsUrl(url) || isLoopbackHttpUrl(url);
 }
 
 // Order `index.json#packages[].versions[]` newest-first, by SemVer precedence.
@@ -540,8 +592,8 @@ struct RepositoryRegistry::Impl {
 
     void refreshOne(Repository& r) {
         r.resolveError.clear();
-        if (!isHttpsUrl(r.url)) {
-            r.resolveError = "unsupported URL scheme (https required in v1)";
+        if (!isSupportedRepositoryUrl(r.url)) {
+            r.resolveError = kUnsupportedSchemeError;
             return;
         }
         std::string body;
@@ -616,7 +668,7 @@ std::string RepositoryRegistry::addRepository(const std::string& url) {
         impl_->defaultDisabled = false;
         return impl_->save();
     }
-    if (!isHttpsUrl(url)) return "unsupported URL scheme (https required in v1)";
+    if (!isSupportedRepositoryUrl(url)) return kUnsupportedSchemeError;
     for (const auto& r : impl_->userRepos) {
         if (r.url == url) return "already registered: " + url;
     }
