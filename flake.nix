@@ -45,6 +45,26 @@
       # run (ctest would have to execute PE binaries on the Linux build host)
       # and a cross devShell offers no way to run what it produces.
       forAllTargets = logos-nix.lib.forAllTargets;
+
+      # The iOS targets, and the ONE build platform that can produce them
+      # (Xcode). Android is absent for the same reason it is absent from
+      # logos-package: lgx cross-compiles there as a SHARED object, and whoever
+      # embeds it in an APK has to answer for liblgx.so being in the APK too.
+      iosBuildSystem = "aarch64-darwin";
+      iosTargets = [ "aarch64-ios" "aarch64-ios-simulator" ];
+      mobileLibs = nixpkgs.lib.genAttrs iosTargets (target:
+        let
+          pkgs = logos-nix.lib.mkIosPkgs { inherit target; buildSystem = iosBuildSystem; };
+          lgx = logos-package.legacyPackages.${iosBuildSystem}.mobile.${target}.lib;
+        in
+        {
+          lib = import ./nix/mobile-ios.nix {
+            inherit pkgs lgx;
+            src = ./.;
+            # A string; nothing else in the desktop common config is touched.
+            inherit (import ./nix/default.nix { inherit pkgs; logosPackageLib = lgx; }) version;
+          };
+        });
     in
     {
       packages = forAllTargets ({ pkgs, system }:
@@ -96,6 +116,13 @@
           default = combined;
         }
       );
+
+      # `legacyPackages`, not `packages`: a cross derivation's `system` is its
+      # BUILD platform, so an iOS archive published under `packages` would
+      # collide with the native aarch64-darwin set and `nix flake check` would
+      # try to realise it as a Mac one. The shape is what
+      # logos-module-builder's `mobilePackages` seam reads.
+      legacyPackages.${iosBuildSystem}.mobile = mobileLibs;
 
       checks = forAllSystems ({ pkgs, logosPackageLib, ... }:
         let
