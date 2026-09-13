@@ -75,15 +75,16 @@ std::string expandLinkTemplate(const std::string& tmpl,
                                const std::string& name,
                                const std::string& version) {
     if (tmpl.empty()) return {};
-    std::string out = tmpl;
-    const std::pair<const char*, const std::string&> subs[] = {
-        {"{name}", name}, {"{version}", version},
+
+    auto replaceAll = [](std::string& s, const std::string& needle, const std::string& value) {
+        for (size_t at = s.find(needle); at != std::string::npos;
+             at = s.find(needle, at + value.size()))
+            s.replace(at, needle.size(), value);
     };
-    for (const auto& [needle, value] : subs) {
-        const std::string n = needle;
-        for (size_t at = out.find(n); at != std::string::npos; at = out.find(n, at + value.size()))
-            out.replace(at, n.size(), value);
-    }
+
+    std::string out = tmpl;
+    replaceAll(out, "{name}", name);
+    replaceAll(out, "{version}", version);
     return out;
 }
 
@@ -802,32 +803,11 @@ struct PackageDownloaderLib::Impl {
                 // filtering rows by platform needs a list to read, not a key
                 // to test for.
                 entry["variants"] = json::array();
-                // Per-module report + universal link, in source order: the
-                // package's own value first (a module hosted somewhere its
-                // repository is not), then the repository's template. Always
-                // present, empty when neither says anything -- same rule as
-                // `variants`, and for the same reason: a consumer needs a field
-                // to read, not a key to test for.
-                //
-                // A non-string package-level value falls THROUGH to the
-                // template. An index is somebody else's file, and a number where
-                // a URL belongs must not reach a consumer as a link it opens.
                 std::string newestVersionName;
-                if (!versions.empty())
-                    newestVersionName =
-                        objOrEmpty(versions[0], "manifest").value("version", "");
-                const std::string pkgName = pkg["name"].is_string()
-                                          ? pkg["name"].get<std::string>() : std::string();
-                auto linkFor = [&](const char* key, const std::string& tmpl) {
-                    if (pkg.contains(key) && pkg[key].is_string())
-                        return pkg[key].get<std::string>();
-                    return expandLinkTemplate(tmpl, pkgName, newestVersionName);
-                };
-                entry["reportUrl"]     = linkFor("reportUrl", r.reportUrlTemplate);
-                entry["universalLink"] = linkFor("universalLink", r.universalLinkTemplate);
                 if (!versions.empty()) {
                     const json& newestVersion = versions[0];
                     const json& newestManifest = objOrEmpty(newestVersion, "manifest");
+                    newestVersionName = newestManifest.value("version", "");
                     entry["displayName"] = newestManifest.value("display_name", "");
                     entry["description"] = newestManifest.value("description", "");
                     entry["type"]        = newestManifest.value("type", "");
@@ -843,6 +823,25 @@ struct PackageDownloaderLib::Impl {
                         entry["icon"] = r.indexUrl.substr(0, slash) + "/" + iconPath;
                     }
                 }
+                // Per-module report + universal link, in source order: the
+                // package's own value first (a module hosted somewhere its
+                // repository is not), then the repository's template. Always
+                // present, empty when neither says anything -- same rule as
+                // `variants`, and for the same reason: a consumer needs a field
+                // to read, not a key to test for.
+                //
+                // A non-string package-level value falls THROUGH to the
+                // template. An index is somebody else's file, and a number where
+                // a URL belongs must not reach a consumer as a link it opens.
+                const std::string pkgName = pkg["name"].is_string()
+                                          ? pkg["name"].get<std::string>() : std::string();
+                auto linkFor = [&](const char* key, const std::string& tmpl) {
+                    if (pkg.contains(key) && pkg[key].is_string())
+                        return pkg[key].get<std::string>();
+                    return expandLinkTemplate(tmpl, pkgName, newestVersionName);
+                };
+                entry["reportUrl"]     = linkFor("reportUrl", r.reportUrlTemplate);
+                entry["universalLink"] = linkFor("universalLink", r.universalLinkTemplate);
                 entry["versions"] = std::move(versions);
                 out.push_back(std::move(entry));
             }
