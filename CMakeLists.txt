@@ -133,7 +133,7 @@ set_target_properties(package_downloader_lib PROPERTIES
 # CLI executable. Not for iOS: an executable in the install tree is not
 # something an iOS app bundle can hold.
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-add_subdirectory(cmd)
+    add_subdirectory(cmd)
 endif()
 
 # Testing (optional)
