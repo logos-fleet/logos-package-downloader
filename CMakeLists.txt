@@ -26,7 +26,11 @@ if(NOT DEFINED LGX_ROOT)
     message(FATAL_ERROR "LGX_ROOT must be set to the logos-package library path")
 endif()
 message(STATUS "Using lgx library at: ${LGX_ROOT}")
-find_library(LGX_LIB lgx PATHS ${LGX_ROOT}/lib NO_DEFAULT_PATH REQUIRED)
+# NO_CMAKE_FIND_ROOT_PATH: an iOS toolchain re-roots find_library at the SDK,
+# so the absolute path named in PATHS is silently rewritten to
+# <sdk>/nix/store/... and nothing is found. NO_DEFAULT_PATH does not turn
+# re-rooting off; only this does.
+find_library(LGX_LIB lgx PATHS ${LGX_ROOT}/lib NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 message(STATUS "Found lgx library: ${LGX_LIB}")
 
 # Library sources
@@ -39,8 +43,16 @@ set(LIB_SOURCES
     src/lgpd.h
 )
 
-# Create the shared library
-add_library(package_downloader_lib SHARED ${LIB_SOURCES})
+# Create the library. Static for a host that LINKS it into the app image
+# rather than loading it (iOS, where Qt itself is static and an app may carry
+# no dynamic library of its own); shared everywhere else, which is what every
+# existing build still gets.
+option(LGPD_STATIC_LIB "Build package_downloader_lib as a static archive" OFF)
+set(LGPD_LIB_TYPE SHARED)
+if(LGPD_STATIC_LIB)
+    set(LGPD_LIB_TYPE STATIC)
+endif()
+add_library(package_downloader_lib ${LGPD_LIB_TYPE} ${LIB_SOURCES})
 
 # The C API in src/lgpd.h is explicitly __declspec(dllexport)-ed, and GNU ld
 # disables PE auto-export for the ENTIRE image as soon as any symbol is
@@ -60,7 +72,9 @@ endif()
 
 
 # Export macro for shared library
-target_compile_definitions(package_downloader_lib PRIVATE LGPD_BUILD_SHARED=1)
+if(NOT LGPD_STATIC_LIB)
+    target_compile_definitions(package_downloader_lib PRIVATE LGPD_BUILD_SHARED=1)
+endif()
 
 set_target_properties(package_downloader_lib PROPERTIES
     OUTPUT_NAME "package_downloader_lib"
@@ -87,7 +101,9 @@ set_target_properties(package_downloader_lib PROPERTIES
     SKIP_BUILD_RPATH FALSE
 )
 
-if(APPLE)
+# There is no dylib to rewrite under LGPD_STATIC_LIB, and install_name_tool
+# refuses an archive.
+if(APPLE AND NOT LGPD_STATIC_LIB)
     set_target_properties(package_downloader_lib PROPERTIES
         INSTALL_RPATH "@loader_path;${LGX_ROOT}/lib"
         INSTALL_NAME_DIR "@rpath"
@@ -114,8 +130,11 @@ set_target_properties(package_downloader_lib PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
 
-# CLI executable
+# CLI executable. Not for iOS: an executable in the install tree is not
+# something an iOS app bundle can hold.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
 add_subdirectory(cmd)
+endif()
 
 # Testing (optional)
 option(LGPD_BUILD_TESTS "Build tests" OFF)
