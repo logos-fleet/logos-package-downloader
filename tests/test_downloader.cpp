@@ -1303,6 +1303,118 @@ TEST(DownloadedSignerBinding, AForgedSignatureNamingTheAdvertisedDidDoesNotBind)
     EXPECT_FALSE(PackageDownloaderLib::downloadedSignerBinds(true, true, "", ""));
 }
 
+// ─── A REPOSITORY'S `trustedSigners` IS ADVISORY DISPLAY DATA (ADR 0008) ─────
+//
+// `logos-repo.json` may carry `trustedSigners[].did`. It is the repository's
+// SELF-ASSERTION about itself, fetched from the same server as everything else
+// it says, so it authorises nothing: a repository that could vouch for its own
+// packages is a repository with no gate in front of it at all. The ONLY anchor
+// set is the local keyring, and nothing enters it except by an explicit user
+// act (logos-package-manager, PackageManagerLib::installPluginFile).
+//
+// Decided rather than dropped, because the field has one honest job: it is the
+// SOURCE OF A CANDIDATE for a "this repository publishes as X — add X to your
+// keyring?" affordance. A candidate, shown to a person, who acts. Never a
+// decision, and never an input to one.
+//
+// So the contract this pins has two halves, and both must hold:
+//   PARSED AND ECHOED  — a UI can show what a repository claims
+//   CONSULTED BY NOTHING — it changes no resolution and no verdict
+//
+// The second half is the one that rots silently: `trustedSignerDids` is a
+// plausible-looking member sitting one field away from the resolver, and
+// wiring it in would look like a feature.
+
+namespace {
+
+// The same one-package catalog as signerCatalogFetcher, plus whatever the
+// repository chooses to advertise about its own signers.
+std::shared_ptr<MockFetcher> vouchingRepoFetcher(const std::vector<SignerRow>& rows,
+                                                 const std::vector<std::string>& vouchedDids) {
+    auto f = signerCatalogFetcher(rows);
+    json signers = json::array();
+    for (const auto& did : vouchedDids)
+        signers.push_back(json{{"did", did}, {"name", "The Repository Itself"}});
+    f->repoJson = json{{"schemaVersion", 1}, {"name", "test"}, {"displayName", "Test"},
+                       {"indexUrl", kIndexUrl}, {"trustedSigners", signers}}.dump();
+    return f;
+}
+
+}  // namespace
+
+TEST(TrustedSigners, TheAdvertisedDidsAreParsedAndEchoedBack) {
+    // The half that DOES work: a "Manage Repositories" screen can show what a
+    // repository claims about itself, and a catalog author can see it arrived.
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(vouchingRepoFetcher(signedNewUnsignedOld(), {kGoodDid, kOtherDid}));
+
+    const auto repos = json::parse(lib.listRepositoriesJson());
+    ASSERT_FALSE(repos.empty());
+    const auto dids = repos[0].value("trustedSignerDids", std::vector<std::string>{});
+    ASSERT_EQ(dids.size(), 2u);
+    EXPECT_EQ(dids[0], kGoodDid);
+    EXPECT_EQ(dids[1], kOtherDid);
+}
+
+TEST(TrustedSigners, AVouchedDidDoesNotSatisfyAPinTheCandidateDoesNotCarry) {
+    // The repository says "we publish as kGoodDid". The only signed release is
+    // signed by kOtherDid. A pin on kGoodDid must find nothing: what a
+    // repository ADVERTISES is not evidence about what it SHIPPED, and letting
+    // the advertisement stand in for the signature would let any repository
+    // serve any bytes under any name it liked.
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(vouchingRepoFetcher(
+        { {"2.0.0", json{{"did", kOtherDid}, {"sig", "beef"}}} }, {kGoodDid}));
+
+    const std::string raw = lib.resolveDependenciesJson(json::array({
+        json{{"name", "bm"}, {"signer", kGoodDid}}
+    }).dump());
+
+    EXPECT_EQ(resolvedVersions(raw).count("bm"), 0u)
+        << "a repository's self-asserted trustedSigners satisfied a pin; raw: " << raw;
+    ASSERT_FALSE(resolverErrors(raw).empty()) << raw;
+}
+
+TEST(TrustedSigners, VouchingForYourOwnSignerAddsNoTrustVerdictToAResolvedEntry) {
+    // The sharpest shape: the repository vouches for EXACTLY the DID that
+    // signed the package, which is the case where wiring the field in would
+    // look most reasonable. The resolved entry must still carry no verdict --
+    // the same assertion SignerPin.ResolvedEntryCarriesNoTrustVerdict makes for
+    // a satisfied pin, because the two are the same mistake from two directions.
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(vouchingRepoFetcher(signedNewUnsignedOld(), {kGoodDid}));
+
+    const std::string raw = lib.resolveDependenciesJson(json::array({
+        json{{"name", "bm"}}
+    }).dump());
+
+    const auto byName = resolvedVersions(raw);
+    ASSERT_EQ(byName.count("bm"), 1u) << raw;
+    for (const auto& e : json::parse(raw)) {
+        if (!e.contains("name")) continue;
+        EXPECT_FALSE(e.contains("trusted"))           << raw;
+        EXPECT_FALSE(e.contains("trusted_as"))        << raw;
+        EXPECT_FALSE(e.contains("trustedSignerDids")) << raw;
+        EXPECT_FALSE(e.contains("verified"))          << raw;
+    }
+}
+
+TEST(TrustedSigners, AVouchedUnsignedReleaseIsStillUnsignedToTheResolver) {
+    // The downgrade shape. bm 1.0.0 carries no signature at all; the repository
+    // advertises a trusted signer anyway. An advertisement must not make an
+    // unsigned row selectable by a pin -- that is B1 ("an empty pin must never
+    // be the thing that selects the unsigned rows") reached by another route.
+    lgpd::PackageDownloaderLib lib;
+    lib.setFetcher(vouchingRepoFetcher({ {"1.0.0", json()} }, {kGoodDid}));
+
+    const std::string raw = lib.resolveDependenciesJson(json::array({
+        json{{"name", "bm"}, {"signer", kGoodDid}}
+    }).dump());
+
+    EXPECT_EQ(resolvedVersions(raw).count("bm"), 0u)
+        << "a vouched-for repository's UNSIGNED release satisfied a pin; raw: " << raw;
+}
+
 // ─── Download staging + failure attribution ──────────────────────────────────
 
 namespace {

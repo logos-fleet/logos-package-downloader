@@ -78,6 +78,15 @@ struct Repository {
     /// addTrustedKey. Never an auto-promotion, and never read by the installer.
     /// (The official catalog ships `"trustedSigners": []` today, so it vouches
     /// for nobody in any case.)
+    ///
+    /// DECIDED, not merely current: logos-workspace ADR 0008 keeps the field in
+    /// the schema and fixes it as ADVISORY DISPLAY DATA -- the source of a
+    /// CANDIDATE for that affordance, shown to a person who acts. Both halves
+    /// of the contract (parsed and echoed; consulted by nothing) are pinned by
+    /// the `TrustedSigners` tests in tests/test_downloader.cpp, because the
+    /// second half is the one that rots silently: this is a plausible-looking
+    /// member sitting one field away from the resolver, and wiring it in would
+    /// look like a feature.
     std::vector<std::string> trustedSignerDids;
 
     /// Per-module link TEMPLATES the repository declares, with `{name}` and

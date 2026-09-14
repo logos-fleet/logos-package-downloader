@@ -71,6 +71,7 @@ source of truth — it federates several and presents them as one.
 | **`rootHash`** | The content Merkle root of a package version. Pins exactly which bytes a version refers to, and disambiguates two builds that happen to share a `version` string. |
 | **Manifest** | The package's own declaration of identity (`name`, `version`), entry points (`main`), `dependencies`, `type`, and descriptive fields. Embedded in the index, and also carried inside the `.lgx` itself. |
 | **Signer DID** | A decentralised identifier naming who signed a version. The downloader binds the advertised signer to the downloaded file; it does **not** evaluate whether that signer is *trusted* (that is the package manager's job). |
+| **`trustedSigners`** | What a repository advertises about its own signers in `logos-repo.json`. **Advisory display data** (logos-workspace ADR 0008): parsed into `Repository::trustedSignerDids`, echoed by `listRepositoriesJson`, and consulted by nothing. It is a repository's self-assertion about itself, fetched from the same server as everything else it says, so it authorises nothing — the only trust-anchor set is the *local keyring*, which nothing enters except by an explicit user act. Its one honest job is to supply the candidate for a "this repository publishes as X — add X to your keyring?" affordance: a candidate, shown to a person, who acts. Never a decision, and never an input to one. |
 
 ### The default repository
 
