@@ -1327,16 +1327,18 @@ TEST(DownloadedSignerBinding, AForgedSignatureNamingTheAdvertisedDidDoesNotBind)
 
 namespace {
 
-// The same one-package catalog as signerCatalogFetcher, plus whatever the
-// repository chooses to advertise about its own signers.
+// signerCatalogFetcher's repository, differing in one field only: what it
+// chooses to advertise about its own signers. Anything a test here observes is
+// down to `trustedSigners` and nothing else.
 std::shared_ptr<MockFetcher> vouchingRepoFetcher(const std::vector<SignerRow>& rows,
                                                  const std::vector<std::string>& vouchedDids) {
     auto f = signerCatalogFetcher(rows);
     json signers = json::array();
     for (const auto& did : vouchedDids)
         signers.push_back(json{{"did", did}, {"name", "The Repository Itself"}});
-    f->repoJson = json{{"schemaVersion", 1}, {"name", "test"}, {"displayName", "Test"},
-                       {"indexUrl", kIndexUrl}, {"trustedSigners", signers}}.dump();
+    json repo = json::parse(f->repoJson);
+    repo["trustedSigners"] = std::move(signers);
+    f->repoJson = repo.dump();
     return f;
 }
 
