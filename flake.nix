@@ -46,25 +46,40 @@
       # and a cross devShell offers no way to run what it produces.
       forAllTargets = logos-nix.lib.forAllTargets;
 
-      # The iOS targets, and the ONE build platform that can produce them
-      # (Xcode). Android is absent for the same reason it is absent from
-      # logos-package: lgx cross-compiles there as a SHARED object, and whoever
-      # embeds it in an APK has to answer for liblgx.so being in the APK too.
+      # The three mobile targets, each under the build platform that can
+      # produce it: iOS needs Xcode (aarch64-darwin, no choice), Android builds
+      # from either member of logos-nix's androidBuildSystems -- and a cross
+      # derivation's `system` is its BUILD platform, so it is published under
+      # each of them rather than under a target key nothing can realise.
+      #
+      # ALL THREE ARE SELF-CONTAINED STATIC ARCHIVES. iOS loads no dynamic
+      # library of its own; Android would take one, but logos-nix's DT_NEEDED
+      # gate refuses an unbundled soname inside an APK. Same shape, two reasons
+      # -- see nix/mobile-ios.nix and nix/mobile-android.nix.
       iosBuildSystem = "aarch64-darwin";
       iosTargets = [ "aarch64-ios" "aarch64-ios-simulator" ];
+      # `version` is the only thing read out of the desktop common config, and
+      # it is a string: nothing in it is instantiated for a phone.
+      mobileLib = { file, pkgs, lgx }: {
+        lib = import file {
+          inherit pkgs lgx;
+          src = ./.;
+          inherit (import ./nix/default.nix { inherit pkgs; logosPackageLib = lgx; }) version;
+        };
+      };
       mobileLibs = nixpkgs.lib.genAttrs iosTargets (target:
-        let
+        mobileLib {
+          file = ./nix/mobile-ios.nix;
           pkgs = logos-nix.lib.mkIosPkgs { inherit target; buildSystem = iosBuildSystem; };
           lgx = logos-package.legacyPackages.${iosBuildSystem}.mobile.${target}.lib;
-        in
-        {
-          lib = import ./nix/mobile-ios.nix {
-            inherit pkgs lgx;
-            src = ./.;
-            # A string; nothing else in the desktop common config is touched.
-            inherit (import ./nix/default.nix { inherit pkgs; logosPackageLib = lgx; }) version;
-          };
         });
+      androidLibs = buildSystem: {
+        aarch64-android = mobileLib {
+          file = ./nix/mobile-android.nix;
+          pkgs = logos-nix.lib.mkAndroidPkgs { inherit buildSystem; };
+          lgx = logos-package.legacyPackages.${buildSystem}.mobile.aarch64-android.lib;
+        };
+      };
     in
     {
       packages = forAllTargets ({ pkgs, system }:
@@ -122,7 +137,14 @@
       # collide with the native aarch64-darwin set and `nix flake check` would
       # try to realise it as a Mac one. The shape is what
       # logos-module-builder's `mobilePackages` seam reads.
-      legacyPackages.${iosBuildSystem}.mobile = mobileLibs;
+      legacyPackages =
+        nixpkgs.lib.genAttrs logos-nix.lib.androidBuildSystems
+          (buildSystem: { mobile = androidLibs buildSystem; })
+        // {
+          # Merged rather than assigned: aarch64-darwin builds both Android and
+          # iOS, and writing it twice would drop one of the two.
+          ${iosBuildSystem}.mobile = mobileLibs // (androidLibs iosBuildSystem);
+        };
 
       checks = forAllSystems ({ pkgs, logosPackageLib, ... }:
         let

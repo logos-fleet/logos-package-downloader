@@ -132,7 +132,17 @@ set_target_properties(package_downloader_lib PROPERTIES
 
 # CLI executable. Not for iOS: an executable in the install tree is not
 # something an iOS app bundle can hold.
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+#
+# LGPD_BUILD_CLI says the same thing for a target whose CMAKE_SYSTEM_NAME does
+# not name it. An Android cross build is CMAKE_SYSTEM_NAME=Linux and an APK
+# holds no executables either -- and under LGPD_STATIC_LIB the CLI is the only
+# thing here that LINKS rather than archives, so it is also the only thing that
+# needs curl's whole TLS tail (libssl, libcrypto) named on its own command line.
+# The library does not: what links it folds those archives in
+# (nix/mobile-android.nix). Building the CLI anyway would make that a
+# requirement of this CMakeLists for no artifact anybody ships.
+option(LGPD_BUILD_CLI "Build the lgpd CLI executable" ON)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND LGPD_BUILD_CLI)
     add_subdirectory(cmd)
 endif()
 
