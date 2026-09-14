@@ -90,6 +90,12 @@
           lgx = logos-package.legacyPackages.${buildSystem}.mobile.aarch64-android.lib;
         };
       };
+      # Every build platform that publishes a mobile set. aarch64-darwin is in
+      # both lists -- it is the only iOS one and it builds Android too -- so the
+      # union is taken once here rather than by patching one entry over the
+      # other afterwards.
+      mobileBuildSystems =
+        nixpkgs.lib.unique (androidBuildSystems ++ [ iosBuildSystem ]);
     in
     {
       packages = forAllTargets ({ pkgs, system }:
@@ -147,14 +153,10 @@
       # collide with the native aarch64-darwin set and `nix flake check` would
       # try to realise it as a Mac one. The shape is what
       # logos-module-builder's `mobilePackages` seam reads.
-      legacyPackages =
-        nixpkgs.lib.genAttrs androidBuildSystems
-          (buildSystem: { mobile = androidLibs buildSystem; })
-        // {
-          # Merged rather than assigned: aarch64-darwin builds both Android and
-          # iOS, and writing it twice would drop one of the two.
-          ${iosBuildSystem}.mobile = mobileLibs // (androidLibs iosBuildSystem);
-        };
+      legacyPackages = nixpkgs.lib.genAttrs mobileBuildSystems (buildSystem: {
+        mobile = androidLibs buildSystem
+          // nixpkgs.lib.optionalAttrs (buildSystem == iosBuildSystem) mobileLibs;
+      });
 
       checks = forAllSystems ({ pkgs, logosPackageLib, ... }:
         let
